@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 import tkinter as tk
 from tkinter import Label, Frame, Scale, Button, Canvas, HORIZONTAL
 from PIL import Image, ImageTk
@@ -51,6 +52,11 @@ PUMP_FWD = 6          # L298N IN1: Pump motor forward (inflate)
 PUMP_BWD = 13          # L298N IN2: Pump motor backward (deflate)
 VALVE_FWD = 19          # L298N IN1: Pump motor forward (inflate)
 VALVE_BWD = 26          # L298N IN2: Pump motor backward (deflate)
+
+# Position control pins
+POSITION_TRIGGER = 21   # Trigger signal for position movement
+CIRCLE_BIT0 = 16        # Circle type encoding bit 0 (大小)
+CIRCLE_BIT1 = 20        # Circle type encoding bit 1 (顏色)
 
 class DualSlider(Frame):
     def __init__(self, parent, min_val, max_val, length, command=None, bg='white'):
@@ -163,14 +169,33 @@ class ColorDetectorUI:
         # Initialize GPIO
         self.init_gpio()
         
-        # Video capture
-        self.cap = cv2.VideoCapture(0)
-        print("Camera Opened?", self.cap.isOpened())
+        # Video capture - Fast initialization with DirectShow (Windows)
+        # Try camera index 0 first (most common), with DirectShow backend for speed
+        print("正在初始化攝像頭...")
+        self.cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)  # CAP_DSHOW speeds up on Windows
+        if not self.cap.isOpened():
+            # Fallback to index 1 if 0 fails
+            print("嘗試攝像頭索引 1...")
+            self.cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+        
+        if self.cap.isOpened():
+            print(f"✓ 攝像頭已打開")
+        else:
+            print("✗ 警告: 無法打開攝像頭")
         
         # Current selected color (0 = red, 1 = blue)
         self.current_color = 0
         # threshold used to decide big vs small circle
         self.size_threshold = 40
+        
+        # Lock state and recorded circles
+        self.is_locked = False
+        self.recorded_left = None   # Will store (color, size) tuple when locked
+        self.recorded_right = None  # Will store (color, size) tuple when locked
+        
+        # Last detected circles (persist across frames even if not currently detected)
+        self.last_detected_left = None   # Last detected left circle
+        self.last_detected_right = None  # Last detected right circle
         
         # HSV ranges for each color (no radius here)
         self.hsv_ranges = {
@@ -218,6 +243,14 @@ class ColorDetectorUI:
             GPIO.setup(VALVE_BWD, GPIO.OUT)
             GPIO.output(VALVE_FWD, GPIO.LOW)
             GPIO.output(VALVE_BWD, GPIO.LOW)
+            
+            # Set up position control pins
+            GPIO.setup(POSITION_TRIGGER, GPIO.OUT)
+            GPIO.setup(CIRCLE_BIT0, GPIO.OUT)
+            GPIO.setup(CIRCLE_BIT1, GPIO.OUT)
+            GPIO.output(POSITION_TRIGGER, GPIO.LOW)
+            GPIO.output(CIRCLE_BIT0, GPIO.LOW)
+            GPIO.output(CIRCLE_BIT1, GPIO.LOW)
         except Exception as e:
             print(f"[WARNING] GPIO initialization error: {e}")
     
@@ -286,6 +319,28 @@ class ColorDetectorUI:
         camera_label.pack()
         self.camera_panel = Label(left_frame, bg='white', width=640, height=360)
         self.camera_panel.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 5))
+        
+        # Lock button and display area below camera
+        lock_frame = Frame(left_frame, bg='#f0f0f0')
+        lock_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.lock_btn = Button(lock_frame, text="🔓 鎖定圓圈", bg='#4CAF50', fg='white', 
+                               font=("Arial", 12, "bold"), command=self.toggle_lock)
+        self.lock_btn.pack(side=tk.LEFT, padx=10, pady=5)
+        
+        # Display recorded circles
+        record_display = Frame(lock_frame, bg='#f0f0f0')
+        record_display.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        
+        Label(record_display, text="左半:", bg='#f0f0f0', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.left_circle_label = Label(record_display, text="未記錄", bg='#f0f0f0', 
+                                       font=("Arial", 10), width=15)
+        self.left_circle_label.pack(side=tk.LEFT, padx=5)
+        
+        Label(record_display, text="右半:", bg='#f0f0f0', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.right_circle_label = Label(record_display, text="未記錄", bg='#f0f0f0', 
+                                        font=("Arial", 10), width=15)
+        self.right_circle_label.pack(side=tk.LEFT, padx=5)
         
         # Left bottom - Mask
         mask_label = Label(left_frame, text="遮罩", bg='white', fg='black', height=2,
@@ -368,8 +423,18 @@ class ColorDetectorUI:
         self.blue_btn = Button(button_frame, text="調整藍色", bg='#888888', fg='white', font=("Arial", 12, "bold"), command=self.select_blue)
         self.blue_btn.pack(fill=tk.X, padx=10, pady=(0, 5))
         
-        # Save / Reset buttons
-        Button(button_frame, text="重置設定", bg='#888888', fg='white', font=("Arial", 10), command=self.reset_values).pack(fill=tk.X, padx=10, pady=(10, 5))
+        # Position and grip control buttons (3 buttons in one row)
+        position_control_frame = Frame(button_frame, bg='white')
+        position_control_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        Button(position_control_frame, text="左位", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+               command=self.send_left_position).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        Button(position_control_frame, text="右位", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+               command=self.send_right_position).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        Button(position_control_frame, text="夾取", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+               command=self.send_grip).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        
+        # Exit button
         Button(button_frame, text="離開", bg='#888888', fg='white', font=("Arial", 10, "bold"), command=self.on_closing).pack(fill=tk.X, padx=10, pady=(10, 10))
         
         # Pneumatic valve control section
@@ -479,6 +544,69 @@ class ColorDetectorUI:
         # Run in thread to avoid blocking UI
         threading.Thread(target=self.pump_deflate, args=(duration,), daemon=True).start()
     
+    def send_left_position(self):
+        """Send left position signal with circle type encoding"""
+        # Check if left circle is detected or recorded
+        circle_info = self.recorded_left if self.is_locked else self.last_detected_left
+        
+        if circle_info is None:
+            print("[警告] 左側未偵測到圓圈")
+            return
+        
+        color, size = circle_info
+        
+        # Encoding: 大紅圓圈=10, 小紅圓圈=00, 大藍圓圈=11, 小藍圓圈=01
+        # BIT0 (GPIO16) = 大小 (big=1, small=0)
+        # BIT1 (GPIO20) = 顏色 (blue=1, red=0)
+        bit0 = GPIO.HIGH if size == "big" else GPIO.LOW
+        bit1 = GPIO.HIGH if color == "blue" else GPIO.LOW
+        
+        # Set circle type encoding
+        GPIO.output(CIRCLE_BIT0, bit0)
+        GPIO.output(CIRCLE_BIT1, bit1)
+        time.sleep(0.05)  # Small delay for signal stability
+        
+        # Send trigger pulse
+        GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
+        time.sleep(0.1)
+        GPIO.output(POSITION_TRIGGER, GPIO.LOW)
+        
+        # Reset encoding pins
+        GPIO.output(CIRCLE_BIT0, GPIO.LOW)
+        GPIO.output(CIRCLE_BIT1, GPIO.LOW)
+        
+        print(f"[左位] 已發送: {color} {size} (BIT0={bit0}, BIT1={bit1})")
+    
+    def send_right_position(self):
+        """Send right position signal with circle type encoding"""
+        # Check if right circle is detected or recorded
+        circle_info = self.recorded_right if self.is_locked else self.last_detected_right
+        
+        if circle_info is None:
+            print("[警告] 右側未偵測到圓圈")
+            return
+        
+        print(f"[右位] 功能待實現")
+    
+    def send_grip(self):
+        """Send grip command"""
+        print(f"[夾取] 功能待實現")
+    
+    def toggle_lock(self):
+        """Toggle lock state and update recorded circles"""
+        self.is_locked = not self.is_locked
+        if self.is_locked:
+            self.lock_btn.config(text="🔒 已鎖定", bg='#f44336')
+        else:
+            self.lock_btn.config(text="🔓 鎖定圓圈", bg='#4CAF50')
+            # Clear recorded circles and last detected when unlocking
+            self.recorded_left = None
+            self.recorded_right = None
+            self.last_detected_left = None
+            self.last_detected_right = None
+            self.left_circle_label.config(text="未偵測")
+            self.right_circle_label.config(text="未偵測")
+    
 
     def update_threshold(self, val):
         """Callback from size scale"""
@@ -539,6 +667,17 @@ class ColorDetectorUI:
                 minRadius=10,
             )
             
+            # Get frame dimensions for center line
+            frame_height, frame_width = frame.shape[:2]
+            center_x = frame_width // 2
+            
+            # Draw center line
+            cv2.line(frame, (center_x, 0), (center_x, frame_height), (255, 0, 255), 2)
+            
+            # Track circles on left and right for this frame
+            current_left = None
+            current_right = None
+            
             # Filter overlapping circles (avoid convertScaleAbs which clamps coords)
             if circles is not None:
                 # circles come as float32, shape (1, N, 3)
@@ -560,20 +699,100 @@ class ColorDetectorUI:
                         filtered_circles.append((x, y, radius))
                 
                 for x, y, radius in filtered_circles:
-                    # determine which mask the center pixel belongs to
+                    # Improved color detection: check multiple points around the circle
+                    # to handle cases where center is not detected due to lighting
                     color_label = "unknown"
-                    if mask_red[y, x] > 0:
+                    color_type = None
+                    red_count = 0
+                    blue_count = 0
+                    
+                    # Sample points: center + 8 points around the circle edge
+                    sample_points = [(x, y)]  # center
+                    for angle in range(0, 360, 45):  # 8 directions
+                        px = int(x + radius * 0.7 * np.cos(np.radians(angle)))
+                        py = int(y + radius * 0.7 * np.sin(np.radians(angle)))
+                        if 0 <= py < frame_height and 0 <= px < frame_width:
+                            sample_points.append((px, py))
+                    
+                    # Count red and blue pixels in sample points
+                    for px, py in sample_points:
+                        if mask_red[py, px] > 0:
+                            red_count += 1
+                        if mask_blue[py, px] > 0:
+                            blue_count += 1
+                    
+                    # Determine color by majority vote
+                    if red_count > blue_count and red_count > 0:
                         color_label = "RC"
-                    elif mask_blue[y, x] > 0:
+                        color_type = "red"
+                    elif blue_count > red_count and blue_count > 0:
                         color_label = "BC"
+                        color_type = "blue"
+                    
                     # size classification using user-controlled threshold
                     size_label = "Big" if radius > self.size_threshold else "Small"
+                    size_type = "big" if radius > self.size_threshold else "small"
                     text_label = f"{size_label} {color_label}"
 
                     cv2.circle(frame, (x, y), radius, (0, 255, 0), 2)
                     # put text above the circle
                     cv2.putText(frame, text_label, (x - radius, y - radius - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                    
+                    # Record circle position (left or right of center)
+                    if color_type:
+                        if x < center_x and current_left is None:
+                            current_left = (color_type, size_type)
+                        elif x >= center_x and current_right is None:
+                            current_right = (color_type, size_type)
+            
+            # Update detection logic:
+            # - Update last_detected when new circles are found
+            # - If locked: save to recorded_left/right and display those
+            # - If not locked: display last_detected to maintain stability
+            
+            # Update last detected if current frame has detections
+            if current_left:
+                self.last_detected_left = current_left
+            if current_right:
+                self.last_detected_right = current_right
+            
+            if self.is_locked:
+                # When locked, save new detections only if not already recorded
+                if current_left and self.recorded_left is None:
+                    self.recorded_left = current_left
+                if current_right and self.recorded_right is None:
+                    self.recorded_right = current_right
+                
+                # Display locked values
+                if self.recorded_left:
+                    color, size = self.recorded_left
+                    color_cn = "紅色" if color == "red" else "藍色"
+                    size_cn = "大" if size == "big" else "小"
+                    self.left_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                
+                if self.recorded_right:
+                    color, size = self.recorded_right
+                    color_cn = "紅色" if color == "red" else "藍色"
+                    size_cn = "大" if size == "big" else "小"
+                    self.right_circle_label.config(text=f"{color_cn} {size_cn}圈")
+            else:
+                # When not locked, display last detected values (persist across frames)
+                if self.last_detected_left:
+                    color, size = self.last_detected_left
+                    color_cn = "紅色" if color == "red" else "藍色"
+                    size_cn = "大" if size == "big" else "小"
+                    self.left_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                else:
+                    self.left_circle_label.config(text="未偵測")
+                
+                if self.last_detected_right:
+                    color, size = self.last_detected_right
+                    color_cn = "紅色" if color == "red" else "藍色"
+                    size_cn = "大" if size == "big" else "小"
+                    self.right_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                else:
+                    self.right_circle_label.config(text="未偵測")
 
             # Update UI
             try:
