@@ -47,9 +47,10 @@ GRIP_PINS = {
     'blue_small': 23    # BLUE SMALL circle grip
 }
 SIGNAL_PIN = 24         # Send/Receive signal (HIGH/LOW)
-PUMP_FWD = 25          # L298N IN1: Pump motor forward (inflate)
-PUMP_BWD = 26          # L298N IN2: Pump motor backward (deflate)
-
+PUMP_FWD = 6          # L298N IN1: Pump motor forward (inflate)
+PUMP_BWD = 13          # L298N IN2: Pump motor backward (deflate)
+VALVE_FWD = 19          # L298N IN1: Pump motor forward (inflate)
+VALVE_BWD = 26          # L298N IN2: Pump motor backward (deflate)
 
 class DualSlider(Frame):
     def __init__(self, parent, min_val, max_val, length, command=None, bg='white'):
@@ -163,7 +164,7 @@ class ColorDetectorUI:
         self.init_gpio()
         
         # Video capture
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        self.cap = cv2.VideoCapture(0)
         print("Camera Opened?", self.cap.isOpened())
         
         # Current selected color (0 = red, 1 = blue)
@@ -211,6 +212,12 @@ class ColorDetectorUI:
             GPIO.setup(PUMP_BWD, GPIO.OUT)
             GPIO.output(PUMP_FWD, GPIO.LOW)
             GPIO.output(PUMP_BWD, GPIO.LOW)
+            
+            # Set up pump control pins
+            GPIO.setup(VALVE_FWD, GPIO.OUT)
+            GPIO.setup(VALVE_BWD, GPIO.OUT)
+            GPIO.output(VALVE_FWD, GPIO.LOW)
+            GPIO.output(VALVE_BWD, GPIO.LOW)
         except Exception as e:
             print(f"[WARNING] GPIO initialization error: {e}")
     
@@ -234,10 +241,10 @@ class ColorDetectorUI:
     
     def pump_deflate(self, duration):
         """Control pump to deflate for specified duration (seconds)"""
-        GPIO.output(PUMP_FWD, GPIO.LOW)
-        GPIO.output(PUMP_BWD, GPIO.HIGH)
+        GPIO.output(VALVE_FWD, GPIO.HIGH)
+        GPIO.output(VALVE_BWD, GPIO.LOW)
         time.sleep(duration)
-        GPIO.output(PUMP_BWD, GPIO.LOW)
+        GPIO.output(VALVE_FWD, GPIO.LOW)
         print(f"Deflated for {duration}s")
     
     def send_signal(self, state):
@@ -250,6 +257,13 @@ class ColorDetectorUI:
         try:
             GPIO.output(PUMP_FWD, GPIO.LOW)
             GPIO.output(PUMP_BWD, GPIO.LOW)
+
+            
+            GPIO.output(VALVE_FWD, GPIO.HIGH)
+            GPIO.output(VALVE_BWD, GPIO.LOW)
+            time.sleep(1)
+            GPIO.output(VALVE_FWD, GPIO.LOW)
+            
             if HAS_GPIO:
                 GPIO.cleanup()
             print("[INFO] GPIO cleaned up")
