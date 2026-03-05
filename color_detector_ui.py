@@ -17,6 +17,8 @@ except ImportError:
     class GPIO:
         BCM = 'BCM'
         OUT = 'OUT'
+        IN = 'IN'
+        PUD_DOWN = 'PUD_DOWN'
         HIGH = 1
         LOW = 0
         
@@ -29,12 +31,20 @@ except ImportError:
             pass
         
         @staticmethod
-        def setup(pin, mode):
-            print(f"[MOCK GPIO] Setup pin {pin} as {mode}")
+        def setup(pin, mode, pull_up_down=None):
+            if pull_up_down:
+                print(f"[MOCK GPIO] Setup pin {pin} as {mode}, pud={pull_up_down}")
+            else:
+                print(f"[MOCK GPIO] Setup pin {pin} as {mode}")
         
         @staticmethod
         def output(pin, state):
             print(f"[MOCK GPIO] Pin {pin} -> {'HIGH' if state else 'LOW'}")
+
+        @staticmethod
+        def input(pin):
+            # Default LOW in mock mode; external trigger can be simulated in code path.
+            return GPIO.LOW
         
         @staticmethod
         def cleanup():
@@ -58,6 +68,14 @@ CIRCLE_BIT0 = 12        # Circle type encoding bit 0 (圓圈種類)
 CIRCLE_BIT1 = 16        # Circle type encoding bit 1 (圓圈種類)
 POSITION_TRIGGER = 20   # Trigger signal for position movement
 STATE_TRIGGER = 21      # State trigger signal
+READY_INPUT_PIN = 4     # Input signal from external controller
+
+CIRCLE_CODE_MAP = {
+    ('red', 'big'): (0, 0),
+    ('red', 'small'): (0, 1),
+    ('blue', 'big'): (1, 0),
+    ('blue', 'small'): (1, 1),
+}
 
 class DualSlider(Frame):
     def __init__(self, parent, min_val, max_val, length, command=None, bg='white'):
@@ -197,6 +215,9 @@ class ColorDetectorUI:
         # Last detected circles (persist across frames even if not currently detected)
         self.last_detected_left = None   # Last detected left circle
         self.last_detected_right = None  # Last detected right circle
+
+        # Grip sequence state
+        self.grip_in_progress = False
         
         # HSV ranges for each color (no radius here)
         self.hsv_ranges = {
@@ -231,7 +252,7 @@ class ColorDetectorUI:
             
             # Set up signal pin
             GPIO.setup(SIGNAL_PIN, GPIO.OUT)
-            GPIO.output(SIGNAL_PIN, GPIO.LOW)
+            GPIO.output(SIGNAL_PIN, GPIO.HIGH)
             
             # Set up pump control pins
             GPIO.setup(PUMP_FWD, GPIO.OUT)
@@ -253,9 +274,74 @@ class ColorDetectorUI:
             GPIO.output(CIRCLE_BIT0, GPIO.HIGH)  # HIGH = inactive
             GPIO.output(CIRCLE_BIT1, GPIO.HIGH)  # HIGH = inactive
             GPIO.output(POSITION_TRIGGER, GPIO.HIGH)  # HIGH = inactive
-            GPIO.output(STATE_TRIGGER, GPIO.HIGH)  # Default HIGH; pulse LOW on grip
+            GPIO.output(STATE_TRIGGER, GPIO.LOW)  # Default LOW; pulse HIGH as completion ACK
+
+            # External trigger input (GPIO4)
+            if HAS_GPIO:
+                GPIO.setup(READY_INPUT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+            else:
+                GPIO.setup(READY_INPUT_PIN, GPIO.IN)
         except Exception as e:
             print(f"[WARNING] GPIO initialization error: {e}")
+
+    def _pulse_state_high(self, duration=1.0):
+        """Send GPIO21 HIGH pulse for acknowledgment."""
+        GPIO.output(STATE_TRIGGER, GPIO.HIGH)
+        time.sleep(duration)
+        GPIO.output(STATE_TRIGGER, GPIO.LOW)
+
+    def _wait_for_ready_high(self, timeout=15.0, stage_text=''):
+        """Wait for one rising event on GPIO4; returns True when received."""
+        if not HAS_GPIO:
+            # In Windows mock mode, auto-pass after a short delay for workflow testing.
+            print(f"[MOCK] {stage_text} 模擬收到 GPIO4 HIGH")
+            time.sleep(0.3)
+            return True
+
+        deadline = time.time() + timeout
+        while self.running and time.time() < deadline:
+            if GPIO.input(READY_INPUT_PIN) == GPIO.HIGH:
+                # Wait until signal falls back to LOW to avoid counting one level twice.
+                while self.running and GPIO.input(READY_INPUT_PIN) == GPIO.HIGH:
+                    time.sleep(0.01)
+                return True
+            time.sleep(0.01)
+        return False
+
+    def _send_single_circle_code(self, side, circle_info):
+        """Send circle type bits and side selection once."""
+        if not circle_info:
+            return
+
+        code = CIRCLE_CODE_MAP.get(circle_info)
+        if code is None:
+            print(f"[圓圈訊號] 未知類型: {circle_info}")
+            return
+
+        bit0, bit1 = code
+        side_level = GPIO.HIGH if side == 'left' else GPIO.LOW
+        GPIO.output(POSITION_TRIGGER, side_level)
+        GPIO.output(CIRCLE_BIT0, GPIO.HIGH if bit0 else GPIO.LOW)
+        GPIO.output(CIRCLE_BIT1, GPIO.HIGH if bit1 else GPIO.LOW)
+
+        # Active-low strobe on SIGNAL_PIN to latch code on receiver side.
+        GPIO.output(SIGNAL_PIN, GPIO.LOW)
+        time.sleep(0.2)
+        GPIO.output(SIGNAL_PIN, GPIO.HIGH)
+        print(f"[圓圈訊號] side={side}, type={circle_info}, code={bit0}{bit1}")
+
+    def send_locked_circle_signals(self):
+        """After locking, send currently known circle info before grip action."""
+        left_info = self.recorded_left or self.last_detected_left
+        right_info = self.recorded_right or self.last_detected_right
+
+        if not left_info and not right_info:
+            print("[圓圈訊號] 尚無可傳送的圓圈資訊")
+            return
+
+        self._send_single_circle_code('left', left_info)
+        time.sleep(0.1)
+        self._send_single_circle_code('right', right_info)
     
     def grip_object(self, color, size):
         """Activate grip for a specific color and size circle"""
@@ -549,33 +635,68 @@ class ColorDetectorUI:
     
     def send_left_position(self):
         """Send left position signal: GPIO20 -> HIGH"""
+        if self.grip_in_progress:
+            print("[左位] 忽略：夾取流程進行中")
+            return
         GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
         print("[左位] 已發送: GPIO20=HIGH")
-        
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
     
     def send_right_position(self):
         """Send right position signal: GPIO20 -> LOW"""
+        if self.grip_in_progress:
+            print("[右位] 忽略：夾取流程進行中")
+            return
         GPIO.output(POSITION_TRIGGER, GPIO.LOW)
         print("[右位] 已發送: GPIO20=LOW")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
+
+    def _grip_sequence(self):
+        """Two-stage ready handshake on GPIO4: inflate then deflate."""
+        self.grip_in_progress = True
+        try:
+            print("[夾取] 等待第 1 次 GPIO4=HIGH (充氣)")
+            if not self._wait_for_ready_high(timeout=20.0, stage_text='第1次'):
+                print("[夾取] 第 1 次等待逾時，流程中止")
+                return
+
+            self.pump_inflate(1.0)
+            self._pulse_state_high(1.0)
+            print("[夾取] 第 1 階段完成：已充氣並送出 GPIO21 HIGH 1 秒")
+
+            print("[夾取] 等待第 2 次 GPIO4=HIGH (洩氣)")
+            if not self._wait_for_ready_high(timeout=20.0, stage_text='第2次'):
+                print("[夾取] 第 2 次等待逾時，流程中止")
+                return
+
+            self.pump_deflate(1.0)
+            self._pulse_state_high(1.0)
+            print("[夾取] 第 2 階段完成：已洩氣並送出 GPIO21 HIGH 1 秒")
+        finally:
+            self.grip_in_progress = False
     
     def send_grip(self):
-        """Send grip command: GPIO21 -> LOW for about 1 second"""
-        GPIO.output(STATE_TRIGGER, GPIO.LOW)
-        time.sleep(1)
-        GPIO.output(STATE_TRIGGER, GPIO.HIGH)
-        print("[夾取] 已發送: GPIO21=LOW (1秒)")
+        """Start grip flow controlled by two GPIO4 HIGH events."""
+        if self.grip_in_progress:
+            print("[夾取] 忽略：流程已在執行中")
+            return
+        threading.Thread(target=self._grip_sequence, daemon=True).start()
     
     def toggle_lock(self):
         """Toggle lock state and update recorded circles"""
         self.is_locked = not self.is_locked
         if self.is_locked:
             self.lock_btn.config(text="🔒 已鎖定", bg='#f44336')
+            # Snapshot current detections and send circle signal immediately.
+            if self.last_detected_left:
+                self.recorded_left = self.last_detected_left
+            if self.last_detected_right:
+                self.recorded_right = self.last_detected_right
+            threading.Thread(target=self.send_locked_circle_signals, daemon=True).start()
         else:
             self.lock_btn.config(text="🔓 鎖定圓圈", bg='#4CAF50')
             # Clear recorded circles and last detected when unlocking
