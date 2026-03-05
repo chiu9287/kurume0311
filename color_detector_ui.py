@@ -319,7 +319,8 @@ class ColorDetectorUI:
             return
 
         bit0, bit1 = code
-        side_level = GPIO.HIGH if side == 'left' else GPIO.LOW
+        # GPIO20 logic inverted per hardware requirement.
+        side_level = GPIO.LOW if side == 'left' else GPIO.HIGH
         GPIO.output(POSITION_TRIGGER, side_level)
         GPIO.output(CIRCLE_BIT0, GPIO.HIGH if bit0 else GPIO.LOW)
         GPIO.output(CIRCLE_BIT1, GPIO.HIGH if bit1 else GPIO.LOW)
@@ -638,8 +639,8 @@ class ColorDetectorUI:
         if self.grip_in_progress:
             print("[左位] 忽略：夾取流程進行中")
             return
-        GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
-        print("[左位] 已發送: GPIO20=HIGH")
+        GPIO.output(POSITION_TRIGGER, GPIO.LOW)
+        print("[左位] 已發送: GPIO20=LOW")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
@@ -649,8 +650,8 @@ class ColorDetectorUI:
         if self.grip_in_progress:
             print("[右位] 忽略：夾取流程進行中")
             return
-        GPIO.output(POSITION_TRIGGER, GPIO.LOW)
-        print("[右位] 已發送: GPIO20=LOW")
+        GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
+        print("[右位] 已發送: GPIO20=HIGH")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
