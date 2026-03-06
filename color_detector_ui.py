@@ -634,10 +634,16 @@ class ColorDetectorUI:
         threading.Thread(target=self.pump_deflate, args=(duration,), daemon=True).start()
     
     def send_left_position(self):
-        """Send left position signal: GPIO20 -> HIGH"""
+        """Send left position signal and circle info"""
         if self.grip_in_progress:
             print("[左位] 忽略：夾取流程進行中")
             return
+        
+        # Send circle signal for left position
+        left_info = self.recorded_left or self.last_detected_left
+        if left_info:
+            self._send_single_circle_code('left', left_info)
+        
         GPIO.output(POSITION_TRIGGER, GPIO.LOW)
         print("[左位] 已發送: GPIO20=LOW")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
@@ -645,10 +651,16 @@ class ColorDetectorUI:
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
     
     def send_right_position(self):
-        """Send right position signal: GPIO20 -> LOW"""
+        """Send right position signal and circle info"""
         if self.grip_in_progress:
             print("[右位] 忽略：夾取流程進行中")
             return
+        
+        # Send circle signal for right position
+        right_info = self.recorded_right or self.last_detected_right
+        if right_info:
+            self._send_single_circle_code('right', right_info)
+        
         GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
         print("[右位] 已發送: GPIO20=HIGH")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
@@ -691,12 +703,11 @@ class ColorDetectorUI:
         self.is_locked = not self.is_locked
         if self.is_locked:
             self.lock_btn.config(text="🔒 已鎖定", bg='#f44336')
-            # Snapshot current detections and send circle signal immediately.
+            # Snapshot current detections (don't send signal yet)
             if self.last_detected_left:
                 self.recorded_left = self.last_detected_left
             if self.last_detected_right:
                 self.recorded_right = self.last_detected_right
-            threading.Thread(target=self.send_locked_circle_signals, daemon=True).start()
         else:
             self.lock_btn.config(text="🔓 鎖定圓圈", bg='#4CAF50')
             # Clear recorded circles and last detected when unlocking
