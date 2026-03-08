@@ -182,7 +182,7 @@ class DualSlider(Frame):
 class ColorDetectorUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Color-based Circle Detector")
+        self.root.title("Circle Color Detector - Control Panel")
         self.root.geometry("1200x700")
         
         # Initialize GPIO
@@ -190,17 +190,17 @@ class ColorDetectorUI:
         
         # Video capture - Fast initialization with DirectShow (Windows)
         # Try camera index 0 first (most common), with DirectShow backend for speed
-        print("正在初始化攝像頭...")
+        print("Initializing camera...")
         self.cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)  # CAP_DSHOW speeds up on Windows
         if not self.cap.isOpened():
             # Fallback to index 1 if 0 fails
-            print("嘗試攝像頭索引 1...")
+            print("Trying camera index 0...")
             self.cap = cv2.VideoCapture(0)
         
         if self.cap.isOpened():
-            print(f"✓ 攝像頭已打開")
+            print(f"✓ Camera opened successfully")
         else:
-            print("✗ 警告: 無法打開攝像頭")
+            print("✗ Warning: Failed to open camera")
         
         # Current selected color (0 = red, 1 = blue)
         self.current_color = 0
@@ -218,11 +218,16 @@ class ColorDetectorUI:
 
         # Grip sequence state
         self.grip_in_progress = False
+
+        # Pneumatic timing state
+        self.max_inflate_time = 4.0
+        self.accumulated_inflate_time = 0.0
+        self.inflate_time_lock = threading.Lock()
         
         # HSV ranges for each color (no radius here)
         self.hsv_ranges = {
-            0: {'name': '紅色', 'low': [0, 100, 100], 'high': [10, 255, 255]},
-            1: {'name': '藍色', 'low': [100, 100, 100], 'high': [130, 255, 255]}
+            0: {'name': 'RED', 'low': [0, 100, 100], 'high': [10, 255, 255]},
+            1: {'name': 'BLUE', 'low': [100, 100, 100], 'high': [130, 255, 255]}
         }
         
         # Create main layout
@@ -244,6 +249,7 @@ class ColorDetectorUI:
                 GPIO.setwarnings(False)
             else:
                 print("[INFO] Running with mock GPIO (Windows development mode)")
+                GPIO.setmode = lambda x: None
             
             # Set up grip pins as outputs
             for pin in GRIP_PINS.values():
@@ -294,7 +300,7 @@ class ColorDetectorUI:
         """Wait for one rising event on GPIO4; returns True when received."""
         if not HAS_GPIO:
             # In Windows mock mode, auto-pass after a short delay for workflow testing.
-            print(f"[MOCK] {stage_text} 模擬收到 GPIO4 HIGH")
+            print(f"[MOCK] {stage_text} Simulated GPIO4 HIGH received")
             time.sleep(0.3)
             return True
 
@@ -315,7 +321,7 @@ class ColorDetectorUI:
 
         code = CIRCLE_CODE_MAP.get(circle_info)
         if code is None:
-            print(f"[圓圈訊號] 未知類型: {circle_info}")
+            print(f"[CIRCLE SIGNAL] Unknown type: {circle_info}")
             return
 
         bit0, bit1 = code
@@ -328,7 +334,7 @@ class ColorDetectorUI:
         GPIO.output(SIGNAL_PIN, GPIO.LOW)
         time.sleep(0.2)
         GPIO.output(SIGNAL_PIN, GPIO.HIGH)
-        print(f"[圓圈訊號] side={side}, type={circle_info}, code={bit0}{bit1}")
+        print(f"[CIRCLE SIGNAL] side={side}, type={circle_info}, code={bit0}{bit1}")
 
     def send_locked_circle_signals(self):
         """After locking, send currently known circle info before grip action."""
@@ -336,7 +342,7 @@ class ColorDetectorUI:
         right_info = self.recorded_right or self.last_detected_right
 
         if not left_info and not right_info:
-            print("[圓圈訊號] 尚無可傳送的圓圈資訊")
+            print("[CIRCLE SIGNAL] No circle info available to send")
             return
 
         self._send_single_circle_code('left', left_info)
@@ -391,6 +397,7 @@ class ColorDetectorUI:
             print("[INFO] GPIO cleaned up")
         except Exception as e:
             print(f"[WARNING] GPIO cleanup error: {e}")
+            GPIO.setwarnings = lambda x: None
     
     
     def create_layout(self):
@@ -403,8 +410,8 @@ class ColorDetectorUI:
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         
         # Left top - Camera feed
-        camera_label = Label(left_frame, text="攝影機", bg='white', fg='black', height=2,
-                             font=("Arial", 14, "bold"))
+        camera_label = Label(left_frame, text="CAMERA FEED", bg='white', fg='black', height=2,
+                             font=("Arial", 16, "bold"))
         camera_label.pack()
         self.camera_panel = Label(left_frame, bg='white', width=640, height=360)
         self.camera_panel.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 5))
@@ -413,27 +420,27 @@ class ColorDetectorUI:
         lock_frame = Frame(left_frame, bg='#f0f0f0')
         lock_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        self.lock_btn = Button(lock_frame, text="🔓 鎖定圓圈", bg='#4CAF50', fg='white', 
-                               font=("Arial", 12, "bold"), command=self.toggle_lock)
+        self.lock_btn = Button(lock_frame, text="🔓 LOCK CIRCLES", bg='#4CAF50', fg='white', 
+                               font=("Arial", 13, "bold"), command=self.toggle_lock)
         self.lock_btn.pack(side=tk.LEFT, padx=10, pady=5)
         
         # Display recorded circles
         record_display = Frame(lock_frame, bg='#f0f0f0')
         record_display.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         
-        Label(record_display, text="左半:", bg='#f0f0f0', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        self.left_circle_label = Label(record_display, text="未記錄", bg='#f0f0f0', 
-                                       font=("Arial", 10), width=15)
+        Label(record_display, text="LEFT:", bg='#f0f0f0', font=("Arial", 11, "bold")).pack(side=tk.LEFT)
+        self.left_circle_label = Label(record_display, text="Not Locked", bg='#f0f0f0', 
+                                       font=("Arial", 11), width=18)
         self.left_circle_label.pack(side=tk.LEFT, padx=5)
         
-        Label(record_display, text="右半:", bg='#f0f0f0', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        self.right_circle_label = Label(record_display, text="未記錄", bg='#f0f0f0', 
-                                        font=("Arial", 10), width=15)
+        Label(record_display, text="RIGHT:", bg='#f0f0f0', font=("Arial", 11, "bold")).pack(side=tk.LEFT)
+        self.right_circle_label = Label(record_display, text="Not Locked", bg='#f0f0f0', 
+                                        font=("Arial", 11), width=18)
         self.right_circle_label.pack(side=tk.LEFT, padx=5)
         
         # Left bottom - Mask
-        mask_label = Label(left_frame, text="遮罩", bg='white', fg='black', height=2,
-                           font=("Arial", 14, "bold"))
+        mask_label = Label(left_frame, text="COLOR MASK", bg='white', fg='black', height=2,
+                           font=("Arial", 16, "bold"))
         mask_label.pack()
         self.mask_panel = Label(left_frame, bg='white', width=640, height=360)
         self.mask_panel.pack(fill=tk.BOTH, expand=True, padx=0)
@@ -443,8 +450,8 @@ class ColorDetectorUI:
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
         
         # Right top - HSV controls header
-        control_label = Label(right_frame, text="HSV調整", bg='white', fg='black', height=2,
-                               font=("Arial", 14, "bold"))
+        control_label = Label(right_frame, text="HSV ADJUSTMENT", bg='white', fg='black', height=2,
+                               font=("Arial", 16, "bold"))
         control_label.pack(fill=tk.X, pady=(0, 10))
         
         self.hsv_sliders = {}
@@ -452,7 +459,7 @@ class ColorDetectorUI:
         hsv_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Color name display (top of controls)
-        self.color_name_label = Label(hsv_frame, text="", font=("Arial", 12, "bold"), bg='#d3d3d3')
+        self.color_name_label = Label(hsv_frame, text="", font=("Arial", 14, "bold"), bg='#d3d3d3')
         self.color_name_label.pack(pady=10)
         
         # Create slider rows using DualSlider
@@ -463,11 +470,11 @@ class ColorDetectorUI:
             # top part: min/max labels match row color
             top = Frame(row, bg='#dddddd')
             top.pack(fill=tk.X)
-            Label(top, text=f"{label}_min:", bg='#dddddd', font=("Arial", 9)).pack(side=tk.LEFT)
-            min_lbl = Label(top, text="0", bg='#dddddd', width=4, font=("Arial", 9))
+            Label(top, text=f"{label} MIN:", bg='#dddddd', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+            min_lbl = Label(top, text="0", bg='#dddddd', width=4, font=("Arial", 10))
             min_lbl.pack(side=tk.LEFT)
-            Label(top, text=f" {label}_max:", bg='#dddddd', font=("Arial", 9)).pack(side=tk.LEFT)
-            max_lbl = Label(top, text="0", bg='#dddddd', width=4, font=("Arial", 9))
+            Label(top, text=f" {label} MAX:", bg='#dddddd', font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+            max_lbl = Label(top, text="0", bg='#dddddd', width=4, font=("Arial", 10))
             max_lbl.pack(side=tk.LEFT)
             setattr(self, f'{key_low}_label', min_lbl)
             setattr(self, f'{key_high}_label', max_lbl)
@@ -488,72 +495,77 @@ class ColorDetectorUI:
 
         
         # Right middle - size threshold control
-        size_label = Label(right_frame, text="大小閾值 (像素)", bg='white', fg='black', height=2,
-                            font=("Arial", 14, "bold"))
+        size_label = Label(right_frame, text="SIZE THRESHOLD (pixels)", bg='white', fg='black', height=2,
+                            font=("Arial", 16, "bold"))
         size_label.pack(fill=tk.X, pady=(10, 0))
         # scale for threshold
         self.size_scale = Scale(right_frame, from_=5, to=100, orient=HORIZONTAL,
-                        label="大於多少視為大圈", command=self.update_threshold,
-                        bg='#d3d3d3', troughcolor='#cccccc')
+                        label="Larger = Big Circle", command=self.update_threshold,
+                        bg='#d3d3d3', troughcolor='#cccccc', font=("Arial", 11))
         self.size_scale.set(40)
         self.size_scale.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         # Right bottom - Button controls
-        button_label = Label(right_frame, text="功能按鍵", bg='white', fg='black', height=2,
-                             font=("Arial", 14, "bold"))
+        button_label = Label(right_frame, text="CONTROL BUTTONS", bg='white', fg='black', height=2,
+                             font=("Arial", 16, "bold"))
         button_label.pack(fill=tk.X, pady=(0, 10))
         
         button_frame = Frame(right_frame, bg='white')
         button_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.red_btn = Button(button_frame, text="調整紅色", bg='#888888', fg='white', font=("Arial", 12, "bold"), command=self.select_red)
+        self.red_btn = Button(button_frame, text="Adjust RED", bg="#FF0000", fg='white', font=("Arial", 12, "bold"), command=self.select_red)
         self.red_btn.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        self.blue_btn = Button(button_frame, text="調整藍色", bg='#888888', fg='white', font=("Arial", 12, "bold"), command=self.select_blue)
+        self.blue_btn = Button(button_frame, text="Adjust BLUE", bg="#2F00FF", fg='white', font=("Arial", 12, "bold"), command=self.select_blue)
         self.blue_btn.pack(fill=tk.X, padx=10, pady=(0, 5))
         
         # Position and grip control buttons (3 buttons in one row)
         position_control_frame = Frame(button_frame, bg='white')
         position_control_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        Button(position_control_frame, text="左位", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+        Button(position_control_frame, text="LEFT", bg='#FF9800', fg='white', font=("Arial", 12, "bold"), 
                command=self.send_left_position).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        Button(position_control_frame, text="右位", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+        Button(position_control_frame, text="RIGHT", bg='#FF9800', fg='white', font=("Arial", 12, "bold"), 
                command=self.send_right_position).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        Button(position_control_frame, text="夾取", bg='#FF9800', fg='white', font=("Arial", 11, "bold"), 
+        Button(position_control_frame, text="GRIP", bg='#FF9800', fg='white', font=("Arial", 12, "bold"), 
                command=self.send_grip).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
         # Exit button
-        Button(button_frame, text="離開", bg='#888888', fg='white', font=("Arial", 10, "bold"), command=self.on_closing).pack(fill=tk.X, padx=10, pady=(10, 10))
+        Button(button_frame, text="EXIT", bg='#888888', fg='white', font=("Arial", 11, "bold"), command=self.on_closing).pack(fill=tk.X, padx=10, pady=(10, 10))
         
         # Pneumatic valve control section
-        pneumatic_label = Label(right_frame, text="氣動控制", bg='white', fg='black', height=2,
-                                font=("Arial", 14, "bold"))
+        pneumatic_label = Label(right_frame, text="PNEUMATIC CONTROL", bg='white', fg='black', height=2,
+                                font=("Arial", 16, "bold"))
         pneumatic_label.pack(fill=tk.X, pady=(10, 0))
         
         pneumatic_frame = Frame(right_frame, bg='white')
         pneumatic_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.inflate_time_label = Label(
+            pneumatic_frame,
+            text=f"Inflate Time: {self.accumulated_inflate_time:.1f}s / {self.max_inflate_time:.1f}s",
+            bg='white',
+            fg='black',
+            font=("Arial", 12, "bold")
+        )
+        self.inflate_time_label.pack(fill=tk.X, padx=10, pady=(0, 5))
         
         # Inflate section
         inflate_frame = Frame(pneumatic_frame, bg='#dddddd')
         inflate_frame.pack(fill=tk.X, padx=10, pady=5)
-        Label(inflate_frame, text="打氣 (秒數)", bg='#dddddd', font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=5, pady=5)
-        self.inflate_scale = Scale(inflate_frame, from_=0.1, to=10, resolution=0.1, orient=HORIZONTAL,
-                                   bg='#d3d3d3', troughcolor='#cccccc')
+        Label(inflate_frame, text="INFLATE (seconds)", bg='#dddddd', font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=5, pady=5)
+        self.inflate_scale = Scale(inflate_frame, from_=0.1, to=4, resolution=0.1, orient=HORIZONTAL,
+                                   bg='#d3d3d3', troughcolor='#cccccc', font=("Arial", 10))
         self.inflate_scale.set(1.0)
         self.inflate_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        Button(inflate_frame, text="執行", bg='#90EE90', fg='black', font=("Arial", 10, "bold"),
+        Button(inflate_frame, text="RUN", bg='#90EE90', fg='black', font=("Arial", 11, "bold"),
                command=self.do_inflate).pack(side=tk.LEFT, padx=5)
         
         # Deflate section
         deflate_frame = Frame(pneumatic_frame, bg='#dddddd')
         deflate_frame.pack(fill=tk.X, padx=10, pady=5)
-        Label(deflate_frame, text="洩氣 (秒數)", bg='#dddddd', font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=5, pady=5)
-        self.deflate_scale = Scale(deflate_frame, from_=0.1, to=10, resolution=0.1, orient=HORIZONTAL,
-                                   bg='#d3d3d3', troughcolor='#cccccc')
-        self.deflate_scale.set(1.0)
-        self.deflate_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        Button(deflate_frame, text="執行", bg='#FFB6C1', fg='black', font=("Arial", 10, "bold"),
+        Label(deflate_frame, text="DEFLATE (fixed 1s)", bg='#dddddd', font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=5, pady=5)
+        Button(deflate_frame, text="RUN", bg='#FFB6C1', fg='black', font=("Arial", 11, "bold"),
                command=self.do_deflate).pack(side=tk.LEFT, padx=5)
         
         # Initialize slider values
@@ -562,7 +574,7 @@ class ColorDetectorUI:
     def update_slider_values(self):
         """Update slider values based on current color selection"""
         color_data = self.hsv_ranges[self.current_color]
-        self.color_name_label.config(text=f"調整目標：{color_data['name']}")
+        self.color_name_label.config(text=f"Current Color: {color_data['name']}")
         
         # set dual sliders
         self.hsv_sliders['h_low'].set(color_data['low'][0], color_data['high'][0])
@@ -623,20 +635,42 @@ class ColorDetectorUI:
     
     def do_inflate(self):
         """Execute inflate for user-specified duration"""
-        duration = self.inflate_scale.get()
+        requested_duration = float(self.inflate_scale.get())
+
+        with self.inflate_time_lock:
+            remaining = self.max_inflate_time - self.accumulated_inflate_time
+            if remaining <= 0:
+                print(f"[INFLATE] Max total reached ({self.max_inflate_time:.1f}s). Please deflate to reset.")
+                return
+
+            duration = min(requested_duration, remaining)
+            self.accumulated_inflate_time += duration
+            self.inflate_time_label.config(
+                text=f"Inflate Time: {self.accumulated_inflate_time:.1f}s / {self.max_inflate_time:.1f}s"
+            )
+
+        if duration < requested_duration:
+            print(f"[INFLATE] Requested {requested_duration:.1f}s, capped to {duration:.1f}s to stay within total limit.")
+
         # Run in thread to avoid blocking UI
         threading.Thread(target=self.pump_inflate, args=(duration,), daemon=True).start()
     
     def do_deflate(self):
-        """Execute deflate for user-specified duration"""
-        duration = self.deflate_scale.get()
+        """Execute fixed 1-second deflate and reset accumulated inflate timer"""
+        with self.inflate_time_lock:
+            self.accumulated_inflate_time = 0.0
+            self.inflate_time_label.config(
+                text=f"Inflate Time: {self.accumulated_inflate_time:.1f}s / {self.max_inflate_time:.1f}s"
+            )
+
+        duration = 1.0
         # Run in thread to avoid blocking UI
         threading.Thread(target=self.pump_deflate, args=(duration,), daemon=True).start()
     
     def send_left_position(self):
         """Send left position signal with circle code"""
         if self.grip_in_progress:
-            print("[左位] 忽略：夾取流程進行中")
+            print("[LEFT] Ignored: Grip in progress")
             return
         
         # Send circle signal for left position
@@ -645,7 +679,7 @@ class ColorDetectorUI:
             self._send_single_circle_code('left', left_info)
         
         GPIO.output(POSITION_TRIGGER, GPIO.HIGH)
-        print("[左位] 已發送: GPIO20=LOW")
+        print("[LEFT] Sent: GPIO20=LOW")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
@@ -653,7 +687,7 @@ class ColorDetectorUI:
     def send_right_position(self):
         """Send right position signal with circle code"""
         if self.grip_in_progress:
-            print("[右位] 忽略：夾取流程進行中")
+            print("[RIGHT] Ignored: Grip in progress")
             return
         
         # Send circle signal for right position
@@ -662,7 +696,7 @@ class ColorDetectorUI:
             self._send_single_circle_code('right', right_info)
         
         GPIO.output(POSITION_TRIGGER, GPIO.LOW)
-        print("[右位] 已發送: GPIO20=HIGH")
+        print("[RIGHT] Sent: GPIO20=HIGH")
         GPIO.output(STATE_TRIGGER, GPIO.LOW)
         time.sleep(1)
         GPIO.output(STATE_TRIGGER, GPIO.HIGH)
@@ -671,30 +705,30 @@ class ColorDetectorUI:
         """Two-stage ready handshake on GPIO4: inflate then deflate."""
         self.grip_in_progress = True
         try:
-            print("[夾取] 等待第 1 次 GPIO4=HIGH (充氣)")
-            if not self._wait_for_ready_high(timeout=20.0, stage_text='第1次'):
-                print("[夾取] 第 1 次等待逾時，流程中止")
+            print("[GRIP] Waiting for 1st GPIO4=HIGH (Inflate)")
+            if not self._wait_for_ready_high(timeout=20.0, stage_text='1st'):
+                print("[GRIP] 1st wait timeout, stopping process")
                 return
 
             self.pump_inflate(3.0)
             self._pulse_state_high(1)
-            print("[夾取] 第 1 階段完成：已充氣並送出 GPIO21 HIGH 1 秒")
+            print("[GRIP] Stage 1 complete: Inflated and sent GPIO21 HIGH for 1 sec")
 
-            print("[夾取] 等待第 2 次 GPIO4=HIGH (洩氣)")
-            if not self._wait_for_ready_high(timeout=20.0, stage_text='第2次'):
-                print("[夾取] 第 2 次等待逾時，流程中止")
+            print("[GRIP] Waiting for 2nd GPIO4=HIGH (Deflate)")
+            if not self._wait_for_ready_high(timeout=20.0, stage_text='2nd'):
+                print("[GRIP] 2nd wait timeout, stopping process")
                 return
 
             self.pump_deflate(1.0)
             self._pulse_state_high(1)
-            print("[夾取] 第 2 階段完成：已洩氣並送出 GPIO21 HIGH 1 秒")
+            print("[GRIP] Stage 2 complete: Deflated and sent GPIO21 HIGH for 1 sec")
         finally:
             self.grip_in_progress = False
     
     def send_grip(self):
         """Start grip flow controlled by two GPIO4 HIGH events."""
         if self.grip_in_progress:
-            print("[夾取] 忽略：流程已在執行中")
+            print("[GRIP] Ignored: Process already in progress")
             return
         
         self._pulse_state_high(1)
@@ -704,21 +738,21 @@ class ColorDetectorUI:
         """Toggle lock state and update recorded circles"""
         self.is_locked = not self.is_locked
         if self.is_locked:
-            self.lock_btn.config(text="🔒 已鎖定", bg='#f44336')
+            self.lock_btn.config(text="🔒         LOCK        ", bg='#f44336')
             # Snapshot current detections, don't send signal yet
             if self.last_detected_left:
                 self.recorded_left = self.last_detected_left
             if self.last_detected_right:
                 self.recorded_right = self.last_detected_right
         else:
-            self.lock_btn.config(text="🔓 鎖定圓圈", bg='#4CAF50')
+            self.lock_btn.config(text="🔓 LOCK CIRCLES", bg='#4CAF50')
             # Clear recorded circles and last detected when unlocking
             self.recorded_left = None
             self.recorded_right = None
             self.last_detected_left = None
             self.last_detected_right = None
-            self.left_circle_label.config(text="未偵測")
-            self.right_circle_label.config(text="未偵測")
+            self.left_circle_label.config(text="Not Locked")
+            self.right_circle_label.config(text="Not Locked")
     
 
     def update_threshold(self, val):
@@ -820,7 +854,11 @@ class ColorDetectorUI:
                     blue_count = 0
                     
                     # Sample points: center + 8 points around the circle edge
-                    sample_points = [(x, y)]  # center
+                    sample_points = []
+                    # Add center point with boundary check
+                    if 0 <= y < frame_height and 0 <= x < frame_width:
+                        sample_points.append((x, y))
+                    # Add edge points
                     for angle in range(0, 360, 45):  # 8 directions
                         px = int(x + radius * 0.7 * np.cos(np.radians(angle)))
                         py = int(y + radius * 0.7 * np.sin(np.radians(angle)))
@@ -829,17 +867,19 @@ class ColorDetectorUI:
                     
                     # Count red and blue pixels in sample points
                     for px, py in sample_points:
-                        if mask_red[py, px] > 0:
-                            red_count += 1
-                        if mask_blue[py, px] > 0:
-                            blue_count += 1
+                        # Extra safety check before accessing arrays
+                        if 0 <= px < frame_width and 0 <= py < frame_height:
+                            if mask_red[py, px] > 0:
+                                red_count += 1
+                            if mask_blue[py, px] > 0:
+                                blue_count += 1
                     
                     # Determine color by majority vote
                     if red_count > blue_count and red_count > 0:
-                        color_label = "RC"
+                        color_label = "RED"
                         color_type = "red"
                     elif blue_count > red_count and blue_count > 0:
-                        color_label = "BC"
+                        color_label = "BLU"
                         color_type = "blue"
                     
                     # size classification using user-controlled threshold
@@ -880,32 +920,32 @@ class ColorDetectorUI:
                 # Display locked values
                 if self.recorded_left:
                     color, size = self.recorded_left
-                    color_cn = "紅色" if color == "red" else "藍色"
-                    size_cn = "大" if size == "big" else "小"
-                    self.left_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                    color_en = "RED" if color == "red" else "BLUE"
+                    size_en = "BIG" if size == "big" else "SMALL"
+                    self.left_circle_label.config(text=f"{color_en} {size_en}")
                 
                 if self.recorded_right:
                     color, size = self.recorded_right
-                    color_cn = "紅色" if color == "red" else "藍色"
-                    size_cn = "大" if size == "big" else "小"
-                    self.right_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                    color_en = "RED" if color == "red" else "BLUE"
+                    size_en = "BIG" if size == "big" else "SMALL"
+                    self.right_circle_label.config(text=f"{color_en} {size_en}")
             else:
                 # When not locked, display last detected values (persist across frames)
                 if self.last_detected_left:
                     color, size = self.last_detected_left
-                    color_cn = "紅色" if color == "red" else "藍色"
-                    size_cn = "大" if size == "big" else "小"
-                    self.left_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                    color_en = "RED" if color == "red" else "BLUE"
+                    size_en = "BIG" if size == "big" else "SMALL"
+                    self.left_circle_label.config(text=f"{color_en} {size_en}")
                 else:
-                    self.left_circle_label.config(text="未偵測")
+                    self.left_circle_label.config(text="Not Detected")
                 
                 if self.last_detected_right:
                     color, size = self.last_detected_right
-                    color_cn = "紅色" if color == "red" else "藍色"
-                    size_cn = "大" if size == "big" else "小"
-                    self.right_circle_label.config(text=f"{color_cn} {size_cn}圈")
+                    color_en = "RED" if color == "red" else "BLUE"
+                    size_en = "BIG" if size == "big" else "SMALL"
+                    self.right_circle_label.config(text=f"{color_en} {size_en}")
                 else:
-                    self.right_circle_label.config(text="未偵測")
+                    self.right_circle_label.config(text="Not Detected")
 
             # Update UI
             try:
